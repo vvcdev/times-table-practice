@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anki Style Times Tables</title>
+    <!-- Tailwind CSS CDN for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for the card flip effect and font */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            perspective: 1000px; /* For 3D flip effect */
+        }
+
+        .flip-card-inner {
+            transition: transform 0.6s;
+            transform-style: preserve-3d;
+        }
+
+        .flip-card.flipped .flip-card-inner {
+            transform: rotateY(180deg);
+        }
+
+        .flip-card-front, .flip-card-back {
+            backface-visibility: hidden;
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 1.5rem; /* Rounded corners for the card */
+            padding: 1.5rem; /* Padding inside the card */
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+        }
+
+        .flip-card-back {
+            transform: rotateY(180deg);
+        }
+
+        /* Basic styles for responsive text size */
+        .question-text, .answer-text {
+            font-size: 3rem; /* Default large font size */
+            font-weight: bold;
+            text-align: center;
+        }
+
+        /* Responsive font sizes */
+        @media (min-width: 640px) { /* sm breakpoint */
+            .question-text, .answer-text {
+                font-size: 4rem;
+            }
+        }
+        @media (min-width: 768px) { /* md breakpoint */
+            .question-text, .answer-text {
+                font-size: 5rem;
+            }
+        }
+        @media (min-width: 1024px) { /* lg breakpoint */
+            .question-text, .answer-text {
+                font-size: 6rem;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-100 to-purple-200 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- Game Title -->
+    <h1 class="text-5xl font-extrabold text-gray-800 mb-8 drop-shadow-lg">
+        🧠 Math Flashcards 🧠
+    </h1>
+
+    <!-- Instructions Box -->
+    <div class="bg-white p-6 rounded-2xl shadow-xl max-w-xl w-full mb-8 text-center text-gray-700">
+        <p class="text-xl font-semibold mb-3">How to Play:</p>
+        <ul class="list-disc list-inside text-lg leading-relaxed">
+            <li>Press <kbd class="px-2 py-1 bg-gray-200 text-gray-800 rounded-md font-mono">SPACE</kbd> to flip the card and reveal the answer.</li>
+            <li>If you got it <span class="font-bold text-green-600">RIGHT</span>, press <kbd class="px-2 py-1 bg-gray-200 text-gray-800 rounded-md font-mono">SPACE</kbd> again for a new question.</li>
+            <li>If you got it <span class="font-bold text-red-600">WRONG</span>, press <kbd class="px-2 py-1 bg-gray-200 text-gray-800 rounded-md font-mono">1</kbd> to see it again later.</li>
+        </ul>
+    </div>
+
+    <!-- Flashcard Container -->
+    <div id="flashcard-container" class="flip-card w-full max-w-2xl h-96 relative flex items-center justify-center">
+        <div class="flip-card-inner w-full h-full">
+            <!-- Front of the card (Question) -->
+            <div id="card-front" class="flip-card-front bg-white text-gray-900 rounded-3xl shadow-2xl border-b-8 border-blue-500">
+                <span id="question-display" class="question-text select-none">
+                    Loading Question...
+                </span>
+            </div>
+            <!-- Back of the card (Answer) -->
+            <div id="card-back" class="flip-card-back bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-3xl shadow-2xl border-b-8 border-purple-800">
+                <span id="answer-display" class="answer-text select-none">
+                    Answer will appear here
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Message Box for user feedback (instead of alert) -->
+    <div id="message-box" class="fixed bottom-4 left-1/2 -translate-x-1/2 bg-gray-800 text-white px-6 py-3 rounded-full shadow-lg z-50 opacity-0 transition-opacity duration-300">
+        Message
+    </div>
+
+    <script>
+        // DOM element references
+        const flashcardContainer = document.getElementById('flashcard-container');
+        const questionDisplay = document.getElementById('question-display');
+        const answerDisplay = document.getElementById('answer-display');
+        const messageBox = document.getElementById('message-box');
+
+        // Game state variables
+        let currentQuestion = { num1: 0, num2: 0, answer: 0 };
+        let isFlipped = false; // Tracks if the card is showing the answer
+        let wrongAnswersQueue = []; // Stores questions marked as wrong to be re-asked later
+        const LOCAL_STORAGE_KEY = 'mathFlashcardsWrongQuestions'; // Key for local storage
+
+        // Counter to mix new questions with questions from the wrong answers queue
+        let newQuestionCounter = 0;
+        // Interval for how often a new question is introduced (e.g., every 3 questions)
+        const NEW_QUESTION_INTERVAL = 3;
+
+        /**
+         * Displays a temporary message to the user.
+         * @param {string} message - The message to display.
+         * @param {number} duration - Duration in milliseconds for the message to be visible.
+         */
+        function showMessage(message, duration = 1500) {
+            messageBox.textContent = message;
+            messageBox.classList.remove('opacity-0');
+            messageBox.classList.add('opacity-100');
+            setTimeout(() => {
+                messageBox.classList.remove('opacity-100');
+                messageBox.classList.add('opacity-0');
+            }, duration);
+        }
+
+        /**
+         * Generates a new random multiplication question.
+         * Numbers are between 1 and 20.
+         * @returns {object} An object containing num1, num2, and their product (answer).
+         */
+        function generateQuestion() {
+            const num1 = Math.floor(Math.random() * 20) + 1; // Numbers from 1 to 20
+            const num2 = Math.floor(Math.random() * 20) + 1; // Numbers from 1 to 20
+            return {
+                num1: num1,
+                num2: num2,
+                answer: num1 * num2
+            };
+        }
+
+        /**
+         * Displays the current question on the flashcard.
+         */
+        function displayQuestion() {
+            questionDisplay.textContent = `${currentQuestion.num1} × ${currentQuestion.num2} = ?`;
+            answerDisplay.textContent = currentQuestion.answer; // Pre-set answer for flip
+        }
+
+        /**
+         * Flips the flashcard to show either the question or the answer.
+         */
+        function flipCard() {
+            flashcardContainer.classList.toggle('flipped');
+            isFlipped = !isFlipped;
+        }
+
+        /**
+         * Loads wrong answers queue from local storage.
+         * Handles potential errors during parsing.
+         */
+        function loadWrongAnswers() {
+            try {
+                const storedQueue = localStorage.getItem(LOCAL_STORAGE_KEY);
+                if (storedQueue) {
+                    wrongAnswersQueue = JSON.parse(storedQueue);
+                    console.log('Loaded wrong answers:', wrongAnswersQueue.length, 'questions');
+                }
+            } catch (e) {
+                console.error("Error loading from local storage:", e);
+                wrongAnswersQueue = []; // Reset queue if data is corrupted
+            }
+        }
+
+        /**
+         * Saves wrong answers queue to local storage.
+         * Handles potential errors during stringification.
+         */
+        function saveWrongAnswers() {
+            try {
+                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(wrongAnswersQueue));
+            } catch (e) {
+                console.error("Error saving to local storage:", e);
+            }
+        }
+
+        /**
+         * Moves to the next question. Prioritizes questions from the wrong answers queue,
+         * but also mixes in new questions based on a counter for a simple spaced repetition effect.
+         */
+        function nextQuestion() {
+            // Unflip the card if it's currently flipped
+            if (isFlipped) {
+                flipCard();
+            }
+
+            // Give a slight delay before showing the next question to allow flip animation
+            setTimeout(() => {
+                let questionSourceMessage = "New question!";
+                // Logic for simple spaced repetition:
+                // If there are questions in the wrong queue, and either it's not time for a new question
+                // OR the wrong queue is getting large (e.g., 5 or more questions), prioritize a wrong one.
+                if (wrongAnswersQueue.length > 0 && (newQuestionCounter < NEW_QUESTION_INTERVAL || wrongAnswersQueue.length >= 5)) {
+                    currentQuestion = wrongAnswersQueue.shift(); // Take the first question from the queue
+                    questionSourceMessage = "Next up: A question you got wrong!";
+                    newQuestionCounter = 0; // Reset counter after showing a wrong question
+                } else {
+                    currentQuestion = generateQuestion();
+                    newQuestionCounter++;
+                }
+
+                displayQuestion();
+                showMessage(questionSourceMessage, 1500);
+            }, 300);
+        }
+
+        /**
+         * Adds the current question to the wrong answers queue and saves it to local storage.
+         */
+        function markWrong() {
+            // Add the current question to the end of the wrong answers queue.
+            // This ensures it will be asked "later" after other questions that are already in the queue or new ones.
+            wrongAnswersQueue.push(currentQuestion);
+            saveWrongAnswers(); // Save the updated queue to local storage
+            showMessage("Added to wrong pile! You'll see it again.", 2000);
+            nextQuestion(); // Move to the next question
+        }
+
+        /**
+         * Handles keyboard input for game actions (SPACE for flip/next, 1 for mark wrong).
+         * @param {KeyboardEvent} event - The keyboard event object.
+         */
+        function handleKeyPress(event) {
+            if (event.code === 'Space') {
+                event.preventDefault(); // Prevent default browser action (e.g., scrolling)
+                if (!isFlipped) {
+                    // If the card is not flipped, flip it to show the answer
+                    flipCard();
+                } else {
+                    // If the card is already flipped, it means the user got it right.
+                    // If the current question was originally from the wrong answers queue, remove it.
+                    const indexInWrongQueue = wrongAnswersQueue.findIndex(q =>
+                        q.num1 === currentQuestion.num1 && q.num2 === currentQuestion.num2
+                    );
+                    if (indexInWrongQueue > -1) {
+                        wrongAnswersQueue.splice(indexInWrongQueue, 1); // Remove the question from the queue
+                        saveWrongAnswers(); // Save the updated queue
+                        showMessage("Great! Removed from wrong pile.", 1500);
+                    } else {
+                        showMessage("Correct!", 1000);
+                    }
+                    nextQuestion(); // Move to the next question
+                }
+            } else if (event.key === '1') {
+                event.preventDefault(); // Prevent default browser action for '1' key
+                if (isFlipped) {
+                    // Only allow marking wrong if the answer is visible
+                    markWrong();
+                } else {
+                    showMessage("Flip the card first to mark wrong!", 1500);
+                }
+            }
+        }
+
+        // Initialize the game when the window loads
+        window.onload = function() {
+            loadWrongAnswers(); // Load any previously saved wrong questions
+            document.addEventListener('keydown', handleKeyPress); // Set up keyboard listener
+            nextQuestion(); // Start the first question
+        };
+    </script>
+</body>
+</html>
