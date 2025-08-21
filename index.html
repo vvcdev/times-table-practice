@@ -64,9 +64,30 @@
                 font-size: 6rem;
             }
         }
+
+        /* Custom scrollbar for memory list */
+        .overflow-y-auto::-webkit-scrollbar {
+            width: 8px;
+        }
+        .overflow-y-auto::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .overflow-y-auto::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        .overflow-y-auto::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
     </style>
 </head>
 <body class="bg-gradient-to-br from-blue-100 to-purple-200 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- Button to open Memories tab -->
+    <button id="open-memories-btn" class="absolute top-4 right-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-full shadow-lg transition duration-200 ease-in-out transform hover:-translate-y-1">
+        Memories 📖
+    </button>
 
     <!-- Game Title -->
     <h1 class="text-5xl font-extrabold text-gray-800 mb-8 drop-shadow-lg">
@@ -106,6 +127,33 @@
         Message
     </div>
 
+    <!-- Memories Modal -->
+    <div id="memories-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 hidden z-40">
+        <div class="bg-white p-8 rounded-3xl shadow-2xl max-w-2xl w-full h-full max-h-[90vh] flex flex-col transform transition-transform duration-300 scale-95 opacity-0" id="memories-modal-content">
+            <h2 class="text-4xl font-extrabold mb-4 text-center text-gray-800 drop-shadow-sm">Your Math Memories</h2>
+            <div class="mb-4">
+                <input type="text" id="memories-search" placeholder="Search questions (e.g., '12x', '84')..." class="w-full p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-blue-200 text-lg">
+            </div>
+            <div class="flex-grow overflow-y-auto border border-gray-200 rounded-xl p-4 bg-gray-50">
+                <h3 class="text-2xl font-bold mb-3 text-red-600 flex items-center">
+                    Wrong Questions <span id="wrong-count" class="ml-2 px-3 py-1 bg-red-100 text-red-700 text-sm font-semibold rounded-full">0</span>
+                </h3>
+                <ul id="wrong-questions-list" class="space-y-3 mb-6">
+                    <!-- Wrong questions will be inserted here -->
+                </ul>
+                <h3 class="text-2xl font-bold mb-3 text-green-600 flex items-center">
+                    Mastered Questions <span id="mastered-count" class="ml-2 px-3 py-1 bg-green-100 text-green-700 text-sm font-semibold rounded-full">0</span>
+                </h3>
+                <ul id="mastered-questions-list" class="space-y-3">
+                    <!-- Mastered questions will be inserted here -->
+                </ul>
+            </div>
+            <button id="close-memories-btn" class="mt-6 bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-200 ease-in-out transform hover:-translate-y-1">
+                Close Memories
+            </button>
+        </div>
+    </div>
+
     <script>
         // DOM element references
         const flashcardContainer = document.getElementById('flashcard-container');
@@ -113,16 +161,37 @@
         const answerDisplay = document.getElementById('answer-display');
         const messageBox = document.getElementById('message-box');
 
+        const openMemoriesBtn = document.getElementById('open-memories-btn');
+        const memoriesModal = document.getElementById('memories-modal');
+        const memoriesModalContent = document.getElementById('memories-modal-content');
+        const closeMemoriesBtn = document.getElementById('close-memories-btn');
+        const memoriesSearch = document.getElementById('memories-search');
+        const wrongQuestionsList = document.getElementById('wrong-questions-list');
+        const masteredQuestionsList = document.getElementById('mastered-questions-list');
+        const wrongCountSpan = document.getElementById('wrong-count');
+        const masteredCountSpan = document.getElementById('mastered-count');
+
         // Game state variables
-        let currentQuestion = { num1: 0, num2: 0, answer: 0 };
+        let currentQuestion = { qId: '', num1: 0, num2: 0, answer: 0 };
         let isFlipped = false; // Tracks if the card is showing the answer
-        let wrongAnswersQueue = []; // Stores questions marked as wrong to be re-asked later
-        const LOCAL_STORAGE_KEY = 'mathFlashcardsWrongQuestions'; // Key for local storage
+
+        // Stored questions (will be loaded/saved from localStorage)
+        let wrongQuestions = [];    // Questions user got wrong (need more practice)
+        let masteredQuestions = []; // Questions user got right (less frequent practice needed)
+
+        // Local Storage Keys
+        const LOCAL_STORAGE_WRONG_KEY = 'mathFlashcardsWrong';
+        const LOCAL_STORAGE_MASTERED_KEY = 'mathFlashcardsMastered';
 
         // Counter to mix new questions with questions from the wrong answers queue
         let newQuestionCounter = 0;
-        // Interval for how often a new question is introduced (e.g., every 3 questions)
-        const NEW_QUESTION_INTERVAL = 3;
+        // Interval for how often a new question is introduced before considering a wrong one.
+        // Increased to 5 to make the delay for wrong questions more noticeable.
+        const NEW_QUESTION_INTERVAL = 5;
+
+        // Interval for how often a mastered question is re-introduced (much larger)
+        const MASTERED_QUESTION_INTERVAL = 20; // Re-introduce mastered questions every 20 new/wrong questions
+        let masteredQuestionCounter = 0;
 
         /**
          * Displays a temporary message to the user.
@@ -140,14 +209,46 @@
         }
 
         /**
+         * Generates a unique ID for a multiplication question.
+         * @param {number} num1
+         * @param {number} num2
+         * @returns {string} Unique ID for the question.
+         */
+        function getQuestionId(num1, num2) {
+            // Standardize ID regardless of order (e.g., 5_7 is same as 7_5)
+            return `${Math.min(num1, num2)}_${Math.max(num1, num2)}`;
+        }
+
+        /**
          * Generates a new random multiplication question.
          * Numbers are between 1 and 20.
-         * @returns {object} An object containing num1, num2, and their product (answer).
+         * It attempts to generate a question that is NOT currently in the masteredQuestions list.
+         * @returns {object} An object containing qId, num1, num2, and their product (answer).
          */
         function generateQuestion() {
-            const num1 = Math.floor(Math.random() * 20) + 1; // Numbers from 1 to 20
-            const num2 = Math.floor(Math.random() * 20) + 1; // Numbers from 1 to 20
+            let num1, num2, qId;
+            let attempts = 0;
+            const MAX_UNIQUE_ATTEMPTS = 50; // Safeguard against infinite loop if nearly all questions are mastered
+
+            do {
+                num1 = Math.floor(Math.random() * 20) + 1; // Numbers from 1 to 20
+                num2 = Math.floor(Math.random() * 20) + 1; // Numbers from 1 to 20
+                qId = getQuestionId(num1, num2);
+                attempts++;
+
+                // If we've tried many times and there are still many mastered questions,
+                // it's likely we're running out of new unmastered questions.
+                // In this case, allow a mastered question to be generated, but only if the 'mastered' queue is large.
+                if (attempts > MAX_UNIQUE_ATTEMPTS && masteredQuestions.length > (20 * 20) / 2) {
+                    // This break allows already-mastered questions to be re-generated as "new"
+                    // if the pool of unmastered questions is exhausted.
+                    // A proper spaced repetition system would handle this better by scheduling.
+                    break;
+                }
+            } while (masteredQuestions.some(q => q.qId === qId));
+
             return {
+                qId: qId,
                 num1: num1,
                 num2: num2,
                 answer: num1 * num2
@@ -171,74 +272,96 @@
         }
 
         /**
-         * Loads wrong answers queue from local storage.
+         * Loads wrong and mastered questions from local storage.
          * Handles potential errors during parsing.
          */
-        function loadWrongAnswers() {
+        function loadQuestions() {
             try {
-                const storedQueue = localStorage.getItem(LOCAL_STORAGE_KEY);
-                if (storedQueue) {
-                    wrongAnswersQueue = JSON.parse(storedQueue);
-                    console.log('Loaded wrong answers:', wrongAnswersQueue.length, 'questions');
+                const storedWrong = localStorage.getItem(LOCAL_STORAGE_WRONG_KEY);
+                if (storedWrong) {
+                    wrongQuestions = JSON.parse(storedWrong);
                 }
+                const storedMastered = localStorage.getItem(LOCAL_STORAGE_MASTERED_KEY);
+                if (storedMastered) {
+                    masteredQuestions = JSON.parse(storedMastered);
+                }
+                console.log(`Loaded ${wrongQuestions.length} wrong and ${masteredQuestions.length} mastered questions.`);
             } catch (e) {
-                console.error("Error loading from local storage:", e);
-                wrongAnswersQueue = []; // Reset queue if data is corrupted
+                console.error("Error loading questions from local storage:", e);
+                wrongQuestions = [];
+                masteredQuestions = [];
             }
         }
 
         /**
-         * Saves wrong answers queue to local storage.
+         * Saves wrong and mastered questions to local storage.
          * Handles potential errors during stringification.
          */
-        function saveWrongAnswers() {
+        function saveQuestions() {
             try {
-                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(wrongAnswersQueue));
+                localStorage.setItem(LOCAL_STORAGE_WRONG_KEY, JSON.stringify(wrongQuestions));
+                localStorage.setItem(LOCAL_STORAGE_MASTERED_KEY, JSON.stringify(masteredQuestions));
             } catch (e) {
-                console.error("Error saving to local storage:", e);
+                console.error("Error saving questions to local storage:", e);
             }
         }
 
         /**
-         * Moves to the next question. Prioritizes questions from the wrong answers queue,
-         * but also mixes in new questions based on a counter for a simple spaced repetition effect.
+         * Moves to the next question. Implements spaced repetition logic.
          */
         function nextQuestion() {
-            // Unflip the card if it's currently flipped
             if (isFlipped) {
                 flipCard();
             }
 
-            // Give a slight delay before showing the next question to allow flip animation
             setTimeout(() => {
                 let questionSourceMessage = "New question!";
-                // Logic for simple spaced repetition:
-                // If there are questions in the wrong queue, and either it's not time for a new question
-                // OR the wrong queue is getting large (e.g., 5 or more questions), prioritize a wrong one.
-                if (wrongAnswersQueue.length > 0 && (newQuestionCounter < NEW_QUESTION_INTERVAL || wrongAnswersQueue.length >= 5)) {
-                    currentQuestion = wrongAnswersQueue.shift(); // Take the first question from the queue
-                    questionSourceMessage = "Next up: A question you got wrong!";
+                let nextQ;
+
+                // 1. Prioritize wrong questions if due based on NEW_QUESTION_INTERVAL
+                if (wrongQuestions.length > 0 && (newQuestionCounter >= NEW_QUESTION_INTERVAL || wrongQuestions.length >= 5)) {
+                    nextQ = wrongQuestions.shift(); // Take the oldest wrong question
+                    questionSourceMessage = "Reviewing a wrong question!";
                     newQuestionCounter = 0; // Reset counter after showing a wrong question
-                } else {
-                    currentQuestion = generateQuestion();
-                    newQuestionCounter++;
+                }
+                // 2. Otherwise, check for mastered questions if due
+                else if (masteredQuestions.length > 0 && masteredQuestionCounter >= MASTERED_QUESTION_INTERVAL) {
+                    // Pick a random mastered question to keep it fresh
+                    const randomIndex = Math.floor(Math.random() * masteredQuestions.length);
+                    nextQ = masteredQuestions[randomIndex];
+                    // Option: Remove from mastered and re-add to end, or just reset counter
+                    masteredQuestionCounter = 0; // Reset counter
+                    questionSourceMessage = "Reviewing a mastered question!";
+                }
+                // 3. Otherwise, generate a new question
+                else {
+                    nextQ = generateQuestion();
+                    newQuestionCounter++; // Increment new question counter
+                    masteredQuestionCounter++; // Increment mastered question counter
+                    questionSourceMessage = "New question!";
                 }
 
+                currentQuestion = nextQ;
                 displayQuestion();
                 showMessage(questionSourceMessage, 1500);
             }, 300);
         }
 
         /**
-         * Adds the current question to the wrong answers queue and saves it to local storage.
+         * Marks the current question as wrong.
+         * Moves it to the wrongQuestions array and saves to local storage.
          */
         function markWrong() {
-            // Add the current question to the end of the wrong answers queue.
-            // This ensures it will be asked "later" after other questions that are already in the queue or new ones.
-            wrongAnswersQueue.push(currentQuestion);
-            saveWrongAnswers(); // Save the updated queue to local storage
+            // Remove from masteredQuestions if it was there (it's now wrong)
+            masteredQuestions = masteredQuestions.filter(q => q.qId !== currentQuestion.qId);
+
+            // Add to wrongQuestions if not already there (prevents duplicates)
+            if (!wrongQuestions.some(q => q.qId === currentQuestion.qId)) {
+                wrongQuestions.push(currentQuestion);
+            }
+            saveQuestions();
             showMessage("Added to wrong pile! You'll see it again.", 2000);
-            nextQuestion(); // Move to the next question
+            nextQuestion();
         }
 
         /**
@@ -246,25 +369,28 @@
          * @param {KeyboardEvent} event - The keyboard event object.
          */
         function handleKeyPress(event) {
+            // If memories modal is open, prevent game interaction
+            if (!memoriesModal.classList.contains('hidden')) {
+                return;
+            }
+
             if (event.code === 'Space') {
                 event.preventDefault(); // Prevent default browser action (e.g., scrolling)
                 if (!isFlipped) {
                     // If the card is not flipped, flip it to show the answer
                     flipCard();
                 } else {
-                    // If the card is already flipped, it means the user got it right.
-                    // If the current question was originally from the wrong answers queue, remove it.
-                    const indexInWrongQueue = wrongAnswersQueue.findIndex(q =>
-                        q.num1 === currentQuestion.num1 && q.num2 === currentQuestion.num2
-                    );
-                    if (indexInWrongQueue > -1) {
-                        wrongAnswersQueue.splice(indexInWrongQueue, 1); // Remove the question from the queue
-                        saveWrongAnswers(); // Save the updated queue
-                        showMessage("Great! Removed from wrong pile.", 1500);
-                    } else {
-                        showMessage("Correct!", 1000);
+                    // If the card is already flipped, user got it right.
+                    // Remove from wrongQuestions if it was there
+                    wrongQuestions = wrongQuestions.filter(q => q.qId !== currentQuestion.qId);
+
+                    // Add to masteredQuestions if not already there
+                    if (!masteredQuestions.some(q => q.qId === currentQuestion.qId)) {
+                        masteredQuestions.push(currentQuestion);
                     }
-                    nextQuestion(); // Move to the next question
+                    saveQuestions();
+                    showMessage("Correct! Moved to mastered questions.", 1500);
+                    nextQuestion();
                 }
             } else if (event.key === '1') {
                 event.preventDefault(); // Prevent default browser action for '1' key
@@ -277,9 +403,119 @@
             }
         }
 
+        // --- Memories Modal Functions ---
+
+        /**
+         * Populates the wrong and mastered questions lists in the modal.
+         * @param {string} searchTerm - Optional search term to filter questions.
+         */
+        function populateMemoriesList(searchTerm = '') {
+            wrongQuestionsList.innerHTML = '';
+            masteredQuestionsList.innerHTML = '';
+
+            const lowerCaseSearchTerm = searchTerm.toLowerCase();
+
+            let wrongCount = 0;
+            wrongQuestions.forEach(q => {
+                const questionText = `${q.num1} × ${q.num2} = ${q.answer}`;
+                if (questionText.toLowerCase().includes(lowerCaseSearchTerm) || q.qId.includes(lowerCaseSearchTerm)) {
+                    wrongQuestionsList.appendChild(createMemoryListItem(q, 'wrong'));
+                    wrongCount++;
+                }
+            });
+            wrongCountSpan.textContent = wrongCount;
+
+            let masteredCount = 0;
+            masteredQuestions.forEach(q => {
+                const questionText = `${q.num1} × ${q.num2} = ${q.answer}`;
+                if (questionText.toLowerCase().includes(lowerCaseSearchTerm) || q.qId.includes(lowerCaseSearchTerm)) {
+                    masteredQuestionsList.appendChild(createMemoryListItem(q, 'mastered'));
+                    masteredCount++;
+                }
+            });
+            masteredCountSpan.textContent = masteredCount;
+        }
+
+        /**
+         * Creates a list item for a question in the memories modal.
+         * @param {object} question - The question object.
+         * @param {string} type - 'wrong' or 'mastered'.
+         * @returns {HTMLElement} The created list item.
+         */
+        function createMemoryListItem(question, type) {
+            const li = document.createElement('li');
+            li.className = 'flex items-center justify-between p-3 bg-white rounded-lg shadow-sm border border-gray-100';
+            li.innerHTML = `
+                <span class="text-gray-800 text-lg font-medium">${question.num1} × ${question.num2} = ${question.answer}</span>
+                <button data-qid="${question.qId}" data-type="${type}" class="delete-memory-btn ml-4 px-4 py-2 bg-red-400 hover:bg-red-500 text-white text-sm font-bold rounded-full shadow transition duration-200">
+                    Delete
+                </button>
+            `;
+            return li;
+        }
+
+        /**
+         * Handles the click event for deleting a question from memories.
+         * @param {Event} event - The click event.
+         */
+        function handleDeleteMemory(event) {
+            const target = event.target;
+            if (target.classList.contains('delete-memory-btn')) {
+                const qIdToDelete = target.dataset.qid;
+                const type = target.dataset.type;
+
+                let confirmation = confirm(`Are you sure you want to delete "${qIdToDelete.replace('_', 'x')}" from your memories?`);
+                if (!confirmation) return;
+
+                if (type === 'wrong') {
+                    wrongQuestions = wrongQuestions.filter(q => q.qId !== qIdToDelete);
+                } else if (type === 'mastered') {
+                    masteredQuestions = masteredQuestions.filter(q => q.qId !== qIdToDelete);
+                }
+                saveQuestions(); // Save updated data
+                populateMemoriesList(memoriesSearch.value); // Re-populate list to reflect changes
+                showMessage("Memory deleted!", 1000);
+            }
+        }
+
+        // --- Event Listeners ---
+
+        // Open Memories Modal
+        openMemoriesBtn.addEventListener('click', () => {
+            memoriesModal.classList.remove('hidden');
+            // Add transition classes after display is block
+            setTimeout(() => {
+                memoriesModalContent.classList.remove('scale-95', 'opacity-0');
+                memoriesModalContent.classList.add('scale-100', 'opacity-100');
+            }, 10); // Small delay for transition to apply
+            populateMemoriesList(); // Load all questions when modal opens
+            memoriesSearch.value = ''; // Clear search bar on open
+            memoriesSearch.focus(); // Focus search bar
+        });
+
+        // Close Memories Modal
+        closeMemoriesBtn.addEventListener('click', () => {
+            memoriesModalContent.classList.remove('scale-100', 'opacity-100');
+            memoriesModalContent.classList.add('scale-95', 'opacity-0');
+            // Hide after transition
+            setTimeout(() => {
+                memoriesModal.classList.add('hidden');
+            }, 300); // Match transition duration
+        });
+
+        // Search functionality in Memories Modal
+        memoriesSearch.addEventListener('input', (event) => {
+            populateMemoriesList(event.target.value);
+        });
+
+        // Delete functionality in Memories Modal (event delegation)
+        wrongQuestionsList.addEventListener('click', handleDeleteMemory);
+        masteredQuestionsList.addEventListener('click', handleDeleteMemory);
+
+
         // Initialize the game when the window loads
         window.onload = function() {
-            loadWrongAnswers(); // Load any previously saved wrong questions
+            loadQuestions(); // Load any previously saved wrong/mastered questions
             document.addEventListener('keydown', handleKeyPress); // Set up keyboard listener
             nextQuestion(); // Start the first question
         };
